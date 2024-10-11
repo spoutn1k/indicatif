@@ -362,7 +362,7 @@ pub(crate) enum LineAdjust {
 
 pub(crate) struct DrawStateWrapper<'a> {
     state: &'a mut DrawState,
-    orphan_lines: Option<&'a mut Vec<String>>,
+    orphan_lines: Option<&'a mut Vec<LineType>>,
 }
 
 impl<'a> DrawStateWrapper<'a> {
@@ -373,7 +373,7 @@ impl<'a> DrawStateWrapper<'a> {
         }
     }
 
-    pub(crate) fn for_multi(state: &'a mut DrawState, orphan_lines: &'a mut Vec<String>) -> Self {
+    pub(crate) fn for_multi(state: &'a mut DrawState, orphan_lines: &'a mut Vec<LineType>) -> Self {
         Self {
             state,
             orphan_lines: Some(orphan_lines),
@@ -460,7 +460,7 @@ const MAX_BURST: u8 = 20;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DrawState {
     /// The lines to print (can contain ANSI codes)
-    pub(crate) lines: Vec<String>,
+    pub(crate) lines: Vec<LineType>,
     /// The number [`Self::lines`] entries that shouldn't be reaped by the next tick.
     ///
     /// Note that this number may be different than the number of visual lines required to draw [`Self::lines`].
@@ -469,6 +469,34 @@ pub(crate) struct DrawState {
     pub(crate) move_cursor: bool,
     /// Controls how the multi progress is aligned if some of its progress bars get removed, default is `Top`
     pub(crate) alignment: MultiProgressAlignment,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum LineType {
+    Text(String),
+    Bar(String),
+    Empty,
+}
+
+impl LineType {
+    pub(crate) fn inner(&self) -> &str {
+        match self {
+            LineType::Text(s) | LineType::Bar(s) => s,
+            LineType::Empty => "",
+        }
+    }
+}
+
+impl AsRef<str> for LineType {
+    fn as_ref(&self) -> &str {
+        self.inner()
+    }
+}
+
+impl PartialEq<str> for LineType {
+    fn eq(&self, other: &str) -> bool {
+        self.inner() == other
+    }
 }
 
 impl DrawState {
@@ -528,11 +556,12 @@ impl DrawState {
         };
 
         // Accumulate the displayed height in here. This differs from `full_height` in that it will
-        // not reflect the displayed content if the terminal height is exceeded.
+        // accurately reflect the number of lines that have been displayed on the terminal, if the
+        // full height exceeds the terminal height.
         let mut real_height = VisualLines::default();
         for (idx, line) in self.lines.iter().enumerate() {
-            let line_width = console::measure_text_width(line);
-            let diff = if line.is_empty() {
+            let line_width = console::measure_text_width(line.inner());
+            let diff = if line.inner().is_empty() {
                 // Empty line are new line
                 1
             } else {
@@ -563,7 +592,7 @@ impl DrawState {
                 term.write_line("")?;
             }
 
-            term.write_str(line)?;
+            term.write_str(line.inner())?;
 
             if idx + 1 == self.lines.len() {
                 // Keep the cursor on the right terminal side
@@ -586,7 +615,7 @@ impl DrawState {
 
     pub(crate) fn visual_line_count(
         &self,
-        range: impl SliceIndex<[String], Output = [String]>,
+        range: impl SliceIndex<[LineType], Output = [LineType]>,
         width: usize,
     ) -> VisualLines {
         visual_line_count(&self.lines[range], width)
