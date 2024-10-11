@@ -485,6 +485,22 @@ impl LineType {
             LineType::Empty => "",
         }
     }
+
+    fn console_width(&self) -> usize {
+        console::measure_text_width(self.inner())
+    }
+
+    fn wrapped_height(&self, width: usize) -> VisualLines {
+        // Calculate real length based on terminal width
+        // This take in account linewrap from terminal
+        let terminal_len = (self.console_width() as f64 / width as f64).ceil() as usize;
+
+        // If the line is effectively empty (for example when it consists
+        // solely of ANSI color code sequences, count it the same as a
+        // new line. If the line is measured to be len = 0, we will
+        // subtract with overflow later.
+        usize::max(terminal_len, 1).into()
+    }
 }
 
 impl AsRef<str> for LineType {
@@ -500,6 +516,10 @@ impl PartialEq<str> for LineType {
 }
 
 impl DrawState {
+    /// Draw the current state to the terminal
+    /// We expect a few things:
+    /// - self.lines contains n lines of text/empty then m lines of bars
+    /// - None of those lines contain newlines
     fn draw_to_term(
         &mut self,
         term: &(impl TermLike + ?Sized),
@@ -525,7 +545,14 @@ impl DrawState {
 
         // Sanity checks
         debug_assert!(full_height == text_height + bar_height);
-        debug_assert!(self.orphan_lines_count <= self.lines.len());
+        debug_assert!(
+            self.orphan_lines_count
+                == self
+                    .lines
+                    .iter()
+                    .filter(|l| matches!(l, LineType::Text(_) | LineType::Empty))
+                    .count()
+        );
 
         if !self.lines.is_empty() && self.move_cursor {
             // Move up to first line (assuming the last line doesn't contain a '\n') and then move to then front of the line
@@ -545,6 +572,8 @@ impl DrawState {
         }
 
         let shift = match self.alignment {
+            // If we align to the bottom and the new height is less than before, clear the lines
+            // that are not used by the new content.
             MultiProgressAlignment::Bottom if full_height < *bar_count => {
                 let shift = *bar_count - full_height;
                 for _ in 0..shift.as_usize() {
@@ -560,34 +589,24 @@ impl DrawState {
         // full height exceeds the terminal height.
         let mut real_height = VisualLines::default();
         for (idx, line) in self.lines.iter().enumerate() {
-            let line_width = console::measure_text_width(line.inner());
-            let diff = if line.inner().is_empty() {
-                // Empty line are new line
-                1
-            } else {
-                // Calculate real length based on terminal width
-                // This take in account linewrap from terminal
-                let terminal_len = (line_width as f64 / term_width as f64).ceil() as usize;
+            let line_height = line.wrapped_height(term_width);
 
-                // If the line is effectively empty (for example when it consists
-                // solely of ANSI color code sequences, count it the same as a
-                // new line. If the line is measured to be len = 0, we will
-                // subtract with overflow later.
-                usize::max(terminal_len, 1)
-            }
-            .into();
-
-            // Have all orphan lines been drawn?
+            // Check here for bar lines that exceed the terminal height
             if self.orphan_lines_count <= idx {
-                // If so, then `real_height` should be at least `orphan_visual_line_count`.
+                // If all the orphan lines have been drawn, then `real_height` should be
+                // at least `orphan_visual_line_count`.
                 debug_assert!(text_height <= real_height);
+
                 // Don't consider orphan lines when comparing to terminal height.
-                if real_height - text_height + diff > term_height.into() {
+                if real_height - text_height + line_height > term_height.into() {
                     break;
                 }
             }
 
-            real_height += diff;
+            real_height += line_height;
+
+            // Print a new line if this is not the first line printed this tick
+            // the first line will automatically wrap due to the filler below
             if idx != 0 {
                 term.write_line("")?;
             }
@@ -595,9 +614,9 @@ impl DrawState {
             term.write_str(line.inner())?;
 
             if idx + 1 == self.lines.len() {
-                // Keep the cursor on the right terminal side
-                // So that next user writes/prints will happen on the next line
-                let last_line_filler = term_width.saturating_sub(line_width);
+                // For the last line of the output, keep the cursor on the right terminal
+                // side so that next user writes/prints will happen on the next line
+                let last_line_filler = line_height.as_usize() * term_width - line.console_width();
                 term.write_str(&" ".repeat(last_line_filler))?;
             }
         }
@@ -669,21 +688,15 @@ impl Sub for VisualLines {
 
 /// Calculate the number of visual lines in the given lines, after
 /// accounting for line wrapping and non-printable characters.
-pub(crate) fn visual_line_count(lines: &[impl AsRef<str>], width: usize) -> VisualLines {
-    let mut real_lines = 0;
-    for line in lines {
-        let effective_line_length = console::measure_text_width(line.as_ref());
-        real_lines += usize::max(
-            (effective_line_length as f64 / width as f64).ceil() as usize,
-            1,
-        );
-    }
-
-    real_lines.into()
+pub(crate) fn visual_line_count(lines: &[LineType], width: usize) -> VisualLines {
+    lines.iter().fold(VisualLines::default(), |acc, line| {
+        acc.saturating_add(line.wrapped_height(width))
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::draw_target::LineType;
     use crate::{MultiProgress, ProgressBar, ProgressDrawTarget};
 
     #[test]
@@ -777,7 +790,14 @@ mod tests {
         ];
 
         for case in lines_and_expectations.iter() {
-            let result = super::visual_line_count(case.lines, case.width);
+            let result = super::visual_line_count(
+                &case
+                    .lines
+                    .iter()
+                    .map(|s| LineType::Text(s.to_string()))
+                    .collect::<Vec<_>>(),
+                case.width,
+            );
             assert_eq!(result, case.expectation.into(), "case: {:?}", case);
         }
     }
