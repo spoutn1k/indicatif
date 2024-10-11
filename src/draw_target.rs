@@ -401,9 +401,9 @@ impl Drop for DrawStateWrapper<'_> {
             orphaned.extend(
                 self.state
                     .lines
-                    .to_owned()
-                    .into_iter()
-                    .filter(|l| matches!(l, LineType::Text(_) | LineType::Empty)),
+                    .iter()
+                    .filter(|l| matches!(l, LineType::Text(_) | LineType::Empty))
+                    .cloned(),
             );
         }
     }
@@ -534,9 +534,11 @@ impl DrawState {
         let term_width = term.width() as usize;
 
         // The number of text lines that are contained in this draw state
-        let text_line_count = self.lines.iter().fold(0, |acc, line| {
-            acc + matches!(line, LineType::Text(_) | LineType::Empty) as usize
-        });
+        let text_line_count = self
+            .lines
+            .iter()
+            .filter(|line| matches!(line, LineType::Text(_) | LineType::Empty))
+            .count();
         // The number of bar lines that are contained in this draw state
         // let bar_line_count = self.lines.len() - text_line_count;
 
