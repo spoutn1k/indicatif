@@ -398,8 +398,13 @@ impl std::ops::DerefMut for DrawStateWrapper<'_> {
 impl Drop for DrawStateWrapper<'_> {
     fn drop(&mut self) {
         if let Some(orphaned) = &mut self.orphan_lines {
-            orphaned.extend(self.state.lines.drain(..self.state.orphan_lines_count));
-            self.state.orphan_lines_count = 0;
+            orphaned.extend(
+                self.state
+                    .lines
+                    .to_owned()
+                    .into_iter()
+                    .filter(|l| matches!(l, LineType::Text(_) | LineType::Empty)),
+            );
         }
     }
 }
@@ -461,10 +466,6 @@ const MAX_BURST: u8 = 20;
 pub(crate) struct DrawState {
     /// The lines to print (can contain ANSI codes)
     pub(crate) lines: Vec<LineType>,
-    /// The number [`Self::lines`] entries that shouldn't be reaped by the next tick.
-    ///
-    /// Note that this number may be different than the number of visual lines required to draw [`Self::lines`].
-    pub(crate) orphan_lines_count: usize,
     /// True if we should move the cursor up when possible instead of clearing lines.
     pub(crate) move_cursor: bool,
     /// Controls how the multi progress is aligned if some of its progress bars get removed, default is `Top`
@@ -533,7 +534,9 @@ impl DrawState {
         let term_width = term.width() as usize;
 
         // The number of text lines that are contained in this draw state
-        let text_line_count = self.orphan_lines_count;
+        let text_line_count = self.lines.iter().fold(0, |acc, line| {
+            acc + matches!(line, LineType::Text(_) | LineType::Empty) as usize
+        });
         // The number of bar lines that are contained in this draw state
         // let bar_line_count = self.lines.len() - text_line_count;
 
@@ -545,14 +548,6 @@ impl DrawState {
 
         // Sanity checks
         debug_assert!(full_height == text_height + bar_height);
-        debug_assert!(
-            self.orphan_lines_count
-                == self
-                    .lines
-                    .iter()
-                    .filter(|l| matches!(l, LineType::Text(_) | LineType::Empty))
-                    .count()
-        );
 
         if !self.lines.is_empty() && self.move_cursor {
             // Move up to first line (assuming the last line doesn't contain a '\n') and then move to then front of the line
@@ -592,7 +587,7 @@ impl DrawState {
             let line_height = line.wrapped_height(term_width);
 
             // Check here for bar lines that exceed the terminal height
-            if self.orphan_lines_count <= idx {
+            if text_line_count <= idx {
                 // If all the orphan lines have been drawn, then `real_height` should be
                 // at least `orphan_visual_line_count`.
                 debug_assert!(text_height <= real_height);
@@ -629,7 +624,6 @@ impl DrawState {
 
     fn reset(&mut self) {
         self.lines.clear();
-        self.orphan_lines_count = 0;
     }
 
     pub(crate) fn visual_line_count(
